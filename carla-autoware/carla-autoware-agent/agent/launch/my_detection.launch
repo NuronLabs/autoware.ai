@@ -51,12 +51,18 @@
     # vision detection #
     In:  /image_raw [sensor_msgs::Image]
     Out: /detection/image_detector/objects [autoware_msgs::DetectedObjectArray]
-  -->
+    Original:
   <include file='$(find vision_darknet_detect)/launch/vision_yolo3_detect.launch'>
     <arg name='pretrained_model_file' value='$(env CARLA_AUTOWARE_CONTENTS)/config/yolov3/yolov3.weights'/>
     <arg name='names_file' value='$(env CARLA_AUTOWARE_CONTENTS)/config/yolov3/coco.names'/>
     <arg name='score_threshold' value='0.50'/>
     <arg name='nms_threshold' value='0.30'/>
+  </include>
+  -->
+  <include file='$(find vision_fasterrcnnpy_detect)/launch/vision_fasterrcnnpy_detect.launch'>
+    <arg name='pretrained_model_file' value='$(env CARLA_AUTOWARE_CONTENTS)/third_party/vision_fasterrcnnpy_detect/data/model.ts'/>
+    <arg name='use_gpu' value='true'/>
+    <arg name='score_threshold' value='0.50'/>
   </include>
 
   <!--
