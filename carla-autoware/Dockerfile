@@ -1,42 +1,61 @@
-# Make sure drivers are >= 390
-#
-# If you want the highest performance you need to make sure that your host has a functioning Xorg server running
-# even in headless/cloud systems.
-# If your host has a running version of Xorg then set  SDL_VIDEODRIVER=x11 and run the docker container as:
-#
-# sudo -E docker run --privileged --rm --gpus all -it --net=host -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:rw carla:latest /bin/bash
-#
-# Otherwise, set SDL_VIDEODRIVER=offscreen and run the docker container as:
-#
-# sudo -E docker run --rm --gpus all -it --net=host carla:latest /bin/bash
+ARG AUTOWARE_VERSION=1.14.0-melodic-cuda
 
-FROM nvidia/vulkan:1.1.121-cuda-10.1--ubuntu18.04
+FROM autoware/autoware:$AUTOWARE_VERSION
 
-RUN packages='libsdl2-2.0 xserver-xorg libvulkan1' \
-	&& apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y $packages --no-install-recommends \
-    && VULKAN_API_VERSION=`dpkg -s libvulkan1 | grep -oP 'Version: [0-9|\.]+' | grep -oP '[0-9|\.]+'` && \
-	mkdir -p /etc/vulkan/icd.d/ && \
-	echo \
-	"{\
-		\"file_format_version\" : \"1.0.0\",\
-		\"ICD\": {\
-			\"library_path\": \"libGLX_nvidia.so.0\",\
-			\"api_version\" : \"${VULKAN_API_VERSION}\"\
-		}\
-	}" > /etc/vulkan/icd.d/nvidia_icd.json \
-	&& rm -rf /var/lib/apt/lists/*
+WORKDIR /home/autoware
 
+# Update simulation repo to latest master.
+COPY --chown=autoware update_sim.patch ./Autoware
+RUN patch ./Autoware/autoware.ai.repos ./Autoware/update_sim.patch
+RUN cd ./Autoware \
+    && vcs import src < autoware.ai.repos \
+    && git --git-dir=./src/autoware/simulation/.git --work-tree=./src/autoware/simulation pull \
+    && source /opt/ros/melodic/setup.bash \
+    && AUTOWARE_COMPILE_WITH_CUDA=1 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 
-RUN useradd -m carla
+# CARLA PythonAPI
+RUN mkdir ./PythonAPI
+ADD --chown=autoware https://carla-releases.s3.eu-west-3.amazonaws.com/Backup/carla-0.9.10-py2.7-linux-x86_64.egg ./PythonAPI
+RUN echo "export PYTHON2_EGG=$(ls /home/autoware/PythonAPI | grep py2.)" >> .bashrc \
+    && echo "export PYTHONPATH=\$PYTHONPATH:~/PythonAPI/\$PYTHON2_EGG" >> .bashrc
 
-COPY --chown=carla:carla . /home/carla
+# CARLA ROS Bridge
+# There is some kind of mismatch between the ROS debian packages installed in the Autoware image and
+# the latest ros-melodic-ackermann-msgs and ros-melodic-derived-objects-msgs packages. As a
+# workaround we use a snapshot of the ROS apt repository to install an older version of the required
+# packages. 
+RUN sudo rm -f /etc/apt/sources.list.d/ros1-latest.list
+RUN sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-key 4B63CF8FDE49746E98FA01DDAD19BAB3CBF125EA
+RUN sudo sh -c 'echo "deb http://snapshots.ros.org/melodic/2020-08-07/ubuntu $(lsb_release -sc) main" >> /etc/apt/sources.list.d/ros-snapshots.list'
+RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+        python-pip \
+        python-wheel \
+        ros-melodic-ackermann-msgs \
+        ros-melodic-derived-object-msgs \
+    && sudo rm -rf /var/lib/apt/lists/*
+RUN pip install simple-pid pygame networkx==2.2
 
-USER carla
-WORKDIR /home/carla
+RUN git clone -b '0.9.10.1' --recurse-submodules https://github.com/carla-simulator/ros-bridge.git
 
-# Select the video driver between offsreen and x11
-# x11 is recommended for vulkan support
-ENV SDL_VIDEODRIVER=x11
+# CARLA Autoware agent
+COPY --chown=autoware . ./carla-autoware
 
-# you can also run CARLA in -opengl mode
-CMD /bin/bash CarlaUE4.sh -vulkan
+RUN mkdir -p carla_ws/src
+RUN cd carla_ws/src \
+    && ln -s ../../ros-bridge \
+    && ln -s ../../carla-autoware/carla-autoware-agent \
+    && cd .. \
+    && source /opt/ros/melodic/setup.bash \
+    && catkin_make
+
+RUN echo "export CARLA_AUTOWARE_CONTENTS=~/autoware-contents" >> .bashrc \
+    && echo "source ~/carla_ws/devel/setup.bash" >> .bashrc \
+    && echo "source ~/Autoware/install/setup.bash" >> .bashrc
+
+RUN cd \
+    && cp ~/autoware-contents/third_party/build.sh ./ \
+    && chmod +x build.sh \
+    && ./build.sh
+
+CMD ["/bin/bash"]
+
